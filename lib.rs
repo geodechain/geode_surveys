@@ -300,7 +300,9 @@ mod surveys {
         // Tried to close a survey that is not theirs
         AccessDenied,
         // When a payout fails to send
-        PayoutFailed
+        PayoutFailed,
+        // Tried to close a survey using a length (1, 3 or 5) that does not match the survey
+        WrongSurveyLength
     }
 
     // ACTUAL CONTRACT STORAGE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -349,6 +351,20 @@ mod surveys {
                 map_survey_ip_count: Mapping::default(),
                 map_banned_ip: Mapping::default(),
             }
+        }
+
+        // HELPERS (internal only, not callable from outside the contract) >>>>>>>>>>>>>>>>
+
+        // a survey is "live" if it is open, can still pay a respondent,
+        // and has not reached its max responses
+        fn is_live(open: bool, survey_balance: Balance, payout: Balance,
+            total_responses: u128, max_responses: u128) -> bool {
+            open && payout > 0 && survey_balance >= payout && total_responses < max_responses
+        }
+
+        // remove a survey id from a top surveys list (does nothing if it is not there)
+        fn remove_from_list(list: &mut Vec<Hash>, survey_id: &Hash) {
+            list.retain(|id| id != survey_id);
         }
 
         // MESSAGES THAT ALTER CONTRACT STORAGE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -436,6 +452,15 @@ mod surveys {
                 }
 
                 // update list of 100 top paying surveys
+                // if the list is full, first drop any surveys that are used up
+                // (out of balance, max responses reached, or closed) to make room
+                if self.top_surveys5.len() >= 100 {
+                    let map = &self.map_5q_id_to_survey;
+                    self.top_surveys5.retain(|id| {
+                        let s = map.get(id).unwrap_or_default();
+                        Self::is_live(s.open, s.survey_balance, s.payout, s.total_responses, s.max_responses)
+                    });
+                }
                 // get the list of top paying surveys
                 let leaderboard = &self.top_surveys5;
                 // if there are fewer than 100 surveys in the list, just add this one
@@ -561,6 +586,15 @@ mod surveys {
                 }
 
                 // update list of 100 top paying surveys
+                // if the list is full, first drop any surveys that are used up
+                // (out of balance, max responses reached, or closed) to make room
+                if self.top_surveys3.len() >= 100 {
+                    let map = &self.map_3q_id_to_survey;
+                    self.top_surveys3.retain(|id| {
+                        let s = map.get(id).unwrap_or_default();
+                        Self::is_live(s.open, s.survey_balance, s.payout, s.total_responses, s.max_responses)
+                    });
+                }
                 // get the list of top paying surveys
                 let leaderboard = &self.top_surveys3;
                 // if there are fewer than 100 surveys in the list, just add this one
@@ -682,6 +716,15 @@ mod surveys {
                 }
 
                 // update list of 100 top paying surveys
+                // if the list is full, first drop any surveys that are used up
+                // (out of balance, max responses reached, or closed) to make room
+                if self.top_surveys1.len() >= 100 {
+                    let map = &self.map_1q_id_to_survey;
+                    self.top_surveys1.retain(|id| {
+                        let s = map.get(id).unwrap_or_default();
+                        Self::is_live(s.open, s.survey_balance, s.payout, s.total_responses, s.max_responses)
+                    });
+                }
                 // get the list of top paying surveys
                 let leaderboard = &self.top_surveys1;
                 // if there are fewer than 100 surveys in the list, just add this one
@@ -742,131 +785,72 @@ mod surveys {
             let mysurveys = self.map_account_surveys.get(caller).unwrap_or_default();
 
             // is the survey in this owner's list? if not, error
-            if mysurveys.contains(&survey_id) && (length==1 || length==3 || length==5) {
-                // close the survey...
-                // get the survey details, update to closed, and put it back in storage
-                if length==1 {
-                    let mut survey = self.map_1q_id_to_survey.get(survey_id).unwrap_or_default();
-                    survey.open = false;
+            if !mysurveys.contains(&survey_id) {
+                return Err(Error::AccessDenied);
+            }
+
+            // close the survey...
+            // get the survey details, mark it closed, zero its balance, and put it back in storage.
+            // If the survey does not exist under this length (1, 3 or 5), return an error
+            // instead of writing a blank survey into the wrong map.
+            let (paythis, survey_name) = match length {
+                1 => {
+                    let mut survey = self.map_1q_id_to_survey.get(survey_id)
+                        .ok_or(Error::WrongSurveyLength)?;
                     let paythis: Balance = survey.survey_balance;
-                    // update storage
+                    survey.open = false;
+                    survey.survey_balance = 0;
                     if self.map_1q_id_to_survey.try_insert(&survey_id, &survey).is_err() {
                         return Err(Error::DataTooLarge);
                     }
-                    // pay the reminder back to the owner
-                    if self.env().balance() > paythis && paythis > 0 {
-                        // pay the owner the amount paythis
-                        if self.env().transfer(caller, paythis).is_err() {
-                            return Err(Error::PayoutFailed);
-                        }
-                    }
-                    // remove this survey from the list of 100 top paying surveys
-                    // get the list of top paying surveys
-                    let leaderboard = &self.top_surveys1;
-                    // if this survey is there...
-                    if leaderboard.contains(&survey_id) {
-                        let mut index = 0;
-                        // find the index for this survey and remove it
-                        for (i, id) in leaderboard.iter().enumerate() {
-                            if *id==survey_id {
-                                index=i;
-                            }
-                        }
-                        self.top_surveys1.remove(index);
-                    }
-
-                    // EMIT AN EVENT
-                    self.env().emit_event(SurveyClosed {
-                        owner: caller,
-                        survey_id: survey_id,
-                        survey_name: survey.survey_name, 
-                    });
-
-                    // if the survey is not there, do nothing
+                    // remove this survey from the list of 100 top paying surveys (if it is there)
+                    Self::remove_from_list(&mut self.top_surveys1, &survey_id);
+                    (paythis, survey.survey_name)
                 }
-                if length==3 {
-                    let mut survey = self.map_3q_id_to_survey.get(survey_id).unwrap_or_default();
-                    survey.open = false;
+                3 => {
+                    let mut survey = self.map_3q_id_to_survey.get(survey_id)
+                        .ok_or(Error::WrongSurveyLength)?;
                     let paythis: Balance = survey.survey_balance;
-                    // update storage
+                    survey.open = false;
+                    survey.survey_balance = 0;
                     if self.map_3q_id_to_survey.try_insert(&survey_id, &survey).is_err() {
                         return Err(Error::DataTooLarge);
                     }
-                    // pay the reminder back to the owner
-                    if self.env().balance() > paythis && paythis > 0 {
-                        // pay the owner the amount paythis
-                        if self.env().transfer(caller, paythis).is_err() {
-                            return Err(Error::PayoutFailed);
-                        }
-                    }
-                    // remove this survey from the list of 100 top paying surveys
-                    // get the list of top paying surveys
-                    let leaderboard = &self.top_surveys3;
-                    // if this survey is there...
-                    if leaderboard.contains(&survey_id) {
-                        let mut index = 0;
-                        // find the index for this survey and remove it
-                        for (i, id) in leaderboard.iter().enumerate() {
-                            if *id==survey_id {
-                                index=i;
-                            }
-                        }
-                        self.top_surveys3.remove(index);
-                    }
-
-                    // EMIT AN EVENT
-                    self.env().emit_event(SurveyClosed {
-                        owner: caller,
-                        survey_id: survey_id,
-                        survey_name: survey.survey_name, 
-                    });
-
-                    // if the survey is not there, do nothing
+                    Self::remove_from_list(&mut self.top_surveys3, &survey_id);
+                    (paythis, survey.survey_name)
                 }
-                if length==5 {
-                    let mut survey = self.map_5q_id_to_survey.get(survey_id).unwrap_or_default();
-                    survey.open = false;
+                5 => {
+                    let mut survey = self.map_5q_id_to_survey.get(survey_id)
+                        .ok_or(Error::WrongSurveyLength)?;
                     let paythis: Balance = survey.survey_balance;
-                    // update storage
+                    survey.open = false;
+                    survey.survey_balance = 0;
                     if self.map_5q_id_to_survey.try_insert(&survey_id, &survey).is_err() {
                         return Err(Error::DataTooLarge);
                     }
-                    // pay the reminder back to the owner
-                    if self.env().balance() > paythis && paythis > 0 {
-                        // pay the owner the amount paythis
-                        if self.env().transfer(caller, paythis).is_err() {
-                            return Err(Error::PayoutFailed);
-                        }
-                    }
-                    // remove this survey from the list of 100 top paying surveys
-                    // get the list of top paying surveys
-                    let leaderboard = &self.top_surveys5;
-                    // if this survey is there...
-                    if leaderboard.contains(&survey_id) {
-                        let mut index = 0;
-                        // find the index for this survey and remove it
-                        for (i, id) in leaderboard.iter().enumerate() {
-                            if *id==survey_id {
-                                index=i;
-                            }
-                        }
-                        self.top_surveys5.remove(index);
-                    }
-
-                    // EMIT AN EVENT
-                    self.env().emit_event(SurveyClosed {
-                        owner: caller,
-                        survey_id: survey_id,
-                        survey_name: survey.survey_name, 
-                    });
-
-                    // if the survey is not there, do nothing
+                    Self::remove_from_list(&mut self.top_surveys5, &survey_id);
+                    (paythis, survey.survey_name)
                 }
+                _ => return Err(Error::WrongSurveyLength),
+            };
 
+            // pay the remainder back to the owner.
+            // If the transfer fails we return an error, which reverts the whole call
+            // (so the balance is never zeroed without the owner being refunded).
+            // Closing an already-closed survey refunds nothing, because its balance is now 0.
+            if paythis > 0 {
+                if self.env().transfer(caller, paythis).is_err() {
+                    return Err(Error::PayoutFailed);
+                }
             }
-            else { 
-                return Err(Error::AccessDenied);
-            }
+
+            // EMIT AN EVENT
+            self.env().emit_event(SurveyClosed {
+                owner: caller,
+                survey_id: survey_id,
+                survey_name: survey_name, 
+            });
+
             Ok(())
         }
 
@@ -939,6 +923,13 @@ mod surveys {
                 survey.survey_balance = survey.survey_balance.saturating_sub(survey.payout);
                 if self.map_5q_id_to_survey.try_insert(&survey_id, &survey).is_err() {
                     return Err(Error::DataTooLarge);
+                }
+
+                // if this response used up the survey (max responses reached or not enough
+                // balance left for another payout), remove it from the top surveys list
+                if !Self::is_live(survey.open, survey.survey_balance, survey.payout,
+                    survey.total_responses, survey.max_responses) {
+                    Self::remove_from_list(&mut self.top_surveys5, &survey_id);
                 }
                 
                 // update map_5q_id_to_response
@@ -1054,6 +1045,13 @@ mod surveys {
                 if self.map_3q_id_to_survey.try_insert(&survey_id, &survey).is_err() {
                     return Err(Error::DataTooLarge);
                 }
+
+                // if this response used up the survey (max responses reached or not enough
+                // balance left for another payout), remove it from the top surveys list
+                if !Self::is_live(survey.open, survey.survey_balance, survey.payout,
+                    survey.total_responses, survey.max_responses) {
+                    Self::remove_from_list(&mut self.top_surveys3, &survey_id);
+                }
                 
                 // update map_3q_id_to_response
                 if self.map_3q_id_to_response.try_insert(&new_response_id, &new_response).is_err() {
@@ -1164,6 +1162,13 @@ mod surveys {
                 survey.survey_balance = survey.survey_balance.saturating_sub(survey.payout);
                 if self.map_1q_id_to_survey.try_insert(&survey_id, &survey).is_err() {
                     return Err(Error::DataTooLarge);
+                }
+
+                // if this response used up the survey (max responses reached or not enough
+                // balance left for another payout), remove it from the top surveys list
+                if !Self::is_live(survey.open, survey.survey_balance, survey.payout,
+                    survey.total_responses, survey.max_responses) {
+                    Self::remove_from_list(&mut self.top_surveys1, &survey_id);
                 }
                 
                 // update map_1q_id_to_response
@@ -1414,35 +1419,23 @@ mod surveys {
             // check if it is in the 1Q mapping
             if self.map_1q_id_to_survey.contains(survey_id) {
                 let thissurvey = self.map_1q_id_to_survey.get(survey_id).unwrap_or_default();
-                // if there is sufficient balance on this survey and it has not hit max responses, 
-                // include it 
-                if thissurvey.survey_balance >= thissurvey.payout 
-                && thissurvey.payout > 0 
-                && thissurvey.total_responses < thissurvey.max_responses {
-                    results1.push(thissurvey);
-                }
+                // always include it, even if closed or used up, so there is a permanent record
+                // (callers should check open / survey_balance / total_responses before offering it)
+                results1.push(thissurvey);
             }
             // check if it is in the 3Q mapping
             if self.map_3q_id_to_survey.contains(survey_id) {
                 let thissurvey = self.map_3q_id_to_survey.get(survey_id).unwrap_or_default();
-                // if there is sufficient balance on this survey and it has not hit max responses, 
-                // include it 
-                if thissurvey.survey_balance >= thissurvey.payout 
-                && thissurvey.payout > 0 
-                && thissurvey.total_responses < thissurvey.max_responses {
-                    results3.push(thissurvey);
-                }
+                // always include it, even if closed or used up, so there is a permanent record
+                // (callers should check open / survey_balance / total_responses before offering it)
+                results3.push(thissurvey);
             }
             // check if it is in the 5Q mapping
             if self.map_5q_id_to_survey.contains(survey_id) {
                 let thissurvey = self.map_5q_id_to_survey.get(survey_id).unwrap_or_default();
-                // if there is sufficient balance on this survey and it has not hit max responses, 
-                // include it 
-                if thissurvey.survey_balance >= thissurvey.payout 
-                && thissurvey.payout > 0 
-                && thissurvey.total_responses < thissurvey.max_responses {
-                    results5.push(thissurvey);
-                }
+                // always include it, even if closed or used up, so there is a permanent record
+                // (callers should check open / survey_balance / total_responses before offering it)
+                results5.push(thissurvey);
             }
 
             let results = Available {
@@ -1458,5 +1451,126 @@ mod surveys {
 
     }
     // END OF CONTRACT LOGIC
+
+    // UNIT TESTS >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ink::env::{test, DefaultEnvironment};
+
+        type E = DefaultEnvironment;
+
+        fn accounts() -> test::DefaultAccounts<E> { test::default_accounts::<E>() }
+
+        fn setup() -> ContractStorage {
+            let c = ContractStorage::new();
+            let me = test::callee::<E>();
+            test::set_account_balance::<E>(me, 1_000_000_000);
+            c
+        }
+
+        // create a public 1Q survey as `who`, staking exactly payout * max
+        fn make1(c: &mut ContractStorage, who: AccountId, name: &str, payout: Balance, max: u128) -> Hash {
+            test::set_caller::<E>(who);
+            test::set_value_transferred::<E>(payout * max);
+            test::advance_block::<E>(); // new timestamp -> unique survey id
+            c.make_a_new_survey_1(name.as_bytes().to_vec(), true, payout, max, b"q?".to_vec()).unwrap();
+            test::set_value_transferred::<E>(0);
+            *c.map_account_surveys.get(who).unwrap().last().unwrap()
+        }
+
+        fn take1(c: &mut ContractStorage, who: AccountId, id: Hash) -> Result<(), Error> {
+            test::set_caller::<E>(who);
+            c.take_a_survey_1(id, b"1.1.1.1".to_vec(), b"yes".to_vec())
+        }
+
+        // (1) a survey that hits max responses leaves the available list without being closed
+        #[ink::test]
+        fn used_up_survey_is_removed_from_available() {
+            let a = accounts();
+            let mut c = setup();
+            let id = make1(&mut c, a.alice, "s", 10, 1);
+            assert_eq!(c.get_available_surveys().surveys1.len(), 1);
+            take1(&mut c, a.bob, id).unwrap();
+            assert!(!c.top_surveys1.contains(&id));
+            assert_eq!(c.get_available_surveys().surveys1.len(), 0);
+        }
+
+        // (1) a full list of used-up surveys no longer blocks a new survey with the same payout
+        #[ink::test]
+        fn full_list_of_dead_surveys_does_not_block_new_survey() {
+            let a = accounts();
+            let mut c = setup();
+            for i in 0..100 {
+                let id = make1(&mut c, a.alice, &format!("s{}", i), 10, 1);
+                // simulate an old dead survey still sitting on the list (as on the live contract)
+                let mut s = c.map_1q_id_to_survey.get(id).unwrap();
+                s.total_responses = 1;
+                s.survey_balance = 0;
+                c.map_1q_id_to_survey.insert(id, &s);
+            }
+            assert_eq!(c.top_surveys1.len(), 100);
+            let new_id = make1(&mut c, a.charlie, "new", 10, 1);
+            assert_eq!(c.top_surveys1, vec![new_id]);
+            let avail = c.get_available_surveys().surveys1;
+            assert_eq!(avail.len(), 1);
+            assert_eq!(avail[0].survey_id, new_id);
+        }
+
+        // (2) closing zeroes the balance; closing again refunds nothing
+        #[ink::test]
+        fn close_zeroes_balance_and_cannot_refund_twice() {
+            let a = accounts();
+            let mut c = setup();
+            let id = make1(&mut c, a.alice, "s", 10, 5); // stakes 50
+            test::set_caller::<E>(a.alice);
+            let before = test::get_account_balance::<E>(a.alice).unwrap();
+            c.close_my_survey(id, 1).unwrap();
+            assert_eq!(test::get_account_balance::<E>(a.alice).unwrap(), before + 50);
+            let s = c.map_1q_id_to_survey.get(id).unwrap();
+            assert_eq!(s.survey_balance, 0);
+            assert!(!s.open);
+            // second close: no extra refund
+            c.close_my_survey(id, 1).unwrap();
+            assert_eq!(test::get_account_balance::<E>(a.alice).unwrap(), before + 50);
+        }
+
+        // (3) closing with the wrong length errors and writes nothing
+        #[ink::test]
+        fn close_with_wrong_length_errors() {
+            let a = accounts();
+            let mut c = setup();
+            let id = make1(&mut c, a.alice, "s", 10, 5);
+            test::set_caller::<E>(a.alice);
+            assert_eq!(c.close_my_survey(id, 5), Err(Error::WrongSurveyLength));
+            assert_eq!(c.close_my_survey(id, 3), Err(Error::WrongSurveyLength));
+            assert_eq!(c.close_my_survey(id, 2), Err(Error::WrongSurveyLength));
+            assert!(!c.map_5q_id_to_survey.contains(id));
+            assert!(!c.map_3q_id_to_survey.contains(id));
+            assert!(c.map_1q_id_to_survey.get(id).unwrap().open);
+            // someone else's survey is still AccessDenied
+            test::set_caller::<E>(a.bob);
+            assert_eq!(c.close_my_survey(id, 1), Err(Error::AccessDenied));
+        }
+
+        // (4) get_survey_by_id still returns closed and used-up surveys
+        #[ink::test]
+        fn get_survey_by_id_returns_closed_and_used_up() {
+            let a = accounts();
+            let mut c = setup();
+            let closed = make1(&mut c, a.alice, "closed", 10, 5);
+            test::set_caller::<E>(a.alice);
+            c.close_my_survey(closed, 1).unwrap();
+            let r = c.get_survey_by_id(closed).surveys1;
+            assert_eq!(r.len(), 1);
+            assert!(!r[0].open);
+
+            let used = make1(&mut c, a.alice, "used", 10, 1);
+            take1(&mut c, a.bob, used).unwrap();
+            let r = c.get_survey_by_id(used).surveys1;
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0].total_responses, 1);
+        }
+    }
 
 }
