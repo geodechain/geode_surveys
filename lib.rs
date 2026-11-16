@@ -302,7 +302,14 @@ mod surveys {
         // When a payout fails to send
         PayoutFailed,
         // Tried to close a survey using a length (1, 3 or 5) that does not match the survey
-        WrongSurveyLength
+        WrongSurveyLength,
+        // (new errors are added at the end so the existing error numbers do not change)
+        // The contract is paused by the root user
+        ContractPaused,
+        // The contract has been permanently shut down by the root user
+        ContractShutDown,
+        // Only the root user can call this message
+        NotRoot,
     }
 
     // ACTUAL CONTRACT STORAGE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -322,7 +329,14 @@ mod surveys {
         top_surveys3: Vec<Hash>,
         top_surveys5: Vec<Hash>,
         map_survey_ip_count: Mapping<(Hash,Vec<u8>), u8>,
-        map_banned_ip: Mapping<Vec<u8>, u8>,
+        // (survey owner, ip address) -> 1 if that owner has banned that ip from their surveys
+        map_owner_banned_ip: Mapping<(AccountId,Vec<u8>), u8>,
+        // the root user (set to the account that instantiates the contract)
+        root: AccountId,
+        // when true, no one can send messages that change storage (root can still unpause)
+        paused: bool,
+        // when true, the contract is permanently shut down (cannot be undone)
+        shut_down: bool,
     }
 
     // CONTRACT LOGIC >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -349,7 +363,10 @@ mod surveys {
                 top_surveys3: <Vec<Hash>>::default(),
                 top_surveys5: <Vec<Hash>>::default(),
                 map_survey_ip_count: Mapping::default(),
-                map_banned_ip: Mapping::default(),
+                map_owner_banned_ip: Mapping::default(),
+                root: Self::env().caller(),
+                paused: false,
+                shut_down: false,
             }
         }
 
@@ -365,6 +382,22 @@ mod surveys {
         // remove a survey id from a top surveys list (does nothing if it is not there)
         fn remove_from_list(list: &mut Vec<Hash>, survey_id: &Hash) {
             list.retain(|id| id != survey_id);
+        }
+
+        // stop any storage-changing message while the contract is paused or shut down
+        fn ensure_active(&self) -> Result<(), Error> {
+            if self.shut_down {
+                return Err(Error::ContractShutDown);
+            }
+            if self.paused {
+                return Err(Error::ContractPaused);
+            }
+            Ok(())
+        }
+
+        // has this survey's owner banned this ip address from their surveys?
+        fn is_banned(&self, owner: AccountId, ip_address: &[u8]) -> bool {
+            self.map_owner_banned_ip.contains((owner, ip_address.to_vec()))
         }
 
         // MESSAGES THAT ALTER CONTRACT STORAGE >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -386,6 +419,9 @@ mod surveys {
             let caller = Self::env().caller();
 
             // get caller's current list of surveys
+            // no new surveys while the contract is paused or shut down
+            self.ensure_active()?;
+
             let mut mysurveys = self.map_account_surveys.get(caller).unwrap_or_default();
 
             // get the payment from the caller
@@ -523,6 +559,9 @@ mod surveys {
             let caller = Self::env().caller();
 
             // get caller's current list of surveys
+            // no new surveys while the contract is paused or shut down
+            self.ensure_active()?;
+
             let mut mysurveys = self.map_account_surveys.get(caller).unwrap_or_default();
 
             // get the payment from the caller
@@ -655,6 +694,9 @@ mod surveys {
             let caller = Self::env().caller();
 
             // get caller's current list of surveys
+            // no new surveys while the contract is paused or shut down
+            self.ensure_active()?;
+
             let mut mysurveys = self.map_account_surveys.get(caller).unwrap_or_default();
 
             // get the payment from the caller
@@ -779,6 +821,12 @@ mod surveys {
             length: u8,
         ) -> Result<(), Error> {
 
+            // no closing while paused. After a shutdown, closing IS allowed: it is how
+            // owners get their leftover coin back once the contract is shut down.
+            if self.paused && !self.shut_down {
+                return Err(Error::ContractPaused);
+            }
+
             let caller = Self::env().caller();
 
             // get caller's current list of surveys
@@ -869,6 +917,9 @@ mod surveys {
             let caller = Self::env().caller();
             let time = self.env().block_timestamp();
 
+            // no responses while the contract is paused or shut down
+            self.ensure_active()?;
+
             // did the caller already take this survey?
             let repeat = self.map_account_responses.get((caller, survey_id)).unwrap_or_default();
 
@@ -885,7 +936,7 @@ mod surveys {
             || answer_4.len() > 300 || answer_5.len() > 300 
             || repeat==1 || survey.survey_balance < survey.payout
             || survey.total_responses >= survey.max_responses || survey.open==false || ip_count > 3
-            || self.map_banned_ip.contains(ip_address.clone()) {
+            || self.is_banned(survey.owner, &ip_address) {
                 return Err(Error::AccessDenied);
             }
             else { 
@@ -993,6 +1044,9 @@ mod surveys {
             let caller = Self::env().caller();
             let time = self.env().block_timestamp();
 
+            // no responses while the contract is paused or shut down
+            self.ensure_active()?;
+
             // did the caller already take this survey?
             let repeat = self.map_account_responses.get((caller, survey_id)).unwrap_or_default();
 
@@ -1008,7 +1062,7 @@ mod surveys {
             if answer_1.len() > 300 || answer_2.len() > 300 || answer_3.len() > 300  
             || repeat==1 || survey.survey_balance < survey.payout
             || survey.total_responses >= survey.max_responses || survey.open==false || ip_count > 3 
-            || self.map_banned_ip.contains(ip_address.clone()) {
+            || self.is_banned(survey.owner, &ip_address) {
                 return Err(Error::AccessDenied);
             }
             else { 
@@ -1113,6 +1167,9 @@ mod surveys {
             let caller = Self::env().caller();
             let time = self.env().block_timestamp();
 
+            // no responses while the contract is paused or shut down
+            self.ensure_active()?;
+
             // did the caller already take this survey?
             let repeat = self.map_account_responses.get((caller, survey_id)).unwrap_or_default();
 
@@ -1128,7 +1185,7 @@ mod surveys {
             if answer_1.len() > 300 
             || repeat==1 || survey.survey_balance < survey.payout
             || survey.total_responses >= survey.max_responses || survey.open==false || ip_count > 3 
-            || self.map_banned_ip.contains(ip_address.clone()) {
+            || self.is_banned(survey.owner, &ip_address) {
                 return Err(Error::AccessDenied);
             }
             else { 
@@ -1305,6 +1362,11 @@ mod surveys {
             let mut results3 = Vec::new();
             let mut results5 = Vec::new();
 
+            // after a shutdown nothing is available
+            if self.shut_down {
+                return Available { surveys1: results1, surveys3: results3, surveys5: results5 };
+            }
+
             // iterate on each vector to get the survey details
             for i in self.top_surveys1.iter() {
                 let thissurvey = self.map_1q_id_to_survey.get(i).unwrap_or_default();
@@ -1383,12 +1445,15 @@ mod surveys {
             results
         }
 
-        // 12 🟢 Ban an ip address from the app
+        // 12 🟢 Ban an ip address from all of the caller's own surveys
+        // (the ip can still take surveys owned by other people)
         #[ink(message)]
-        pub fn ban_this_ip_address(&mut self, 
+        pub fn ban_this_ip_address(&mut self,
             survey_id: Hash,
             ip_address: Vec<u8>,
         ) -> Result<(), Error> {
+
+            self.ensure_active()?;
 
             let caller = Self::env().caller();
 
@@ -1396,9 +1461,9 @@ mod surveys {
             let mysurveys = self.map_account_surveys.get(caller).unwrap_or_default();
             let ip_response = self.map_survey_ip_count.get((survey_id,ip_address.clone())).unwrap_or_default();
             if mysurveys.contains(&survey_id) && ip_response > 0 {
-                // continue to ban the ip address by adding them to the banned map
+                // ban the ip address from this caller's surveys only
                 let yes: u8 = 1;
-                if self.map_banned_ip.try_insert(&ip_address, &yes).is_err() {
+                if self.map_owner_banned_ip.try_insert(&(caller, ip_address), &yes).is_err() {
                     return Err(Error::DataTooLarge);
                 }
             }
@@ -1447,6 +1512,37 @@ mod surveys {
             results
         }
 
+        // 14 🟢 ROOT ONLY: Pause or unpause the contract
+        // pause = true stops every message that changes storage (new surveys, responses,
+        // closing surveys, banning). Read-only messages keep working.
+        // pause = false resumes normal operation. Cannot be used after a shutdown.
+        #[ink(message)]
+        pub fn pause_contract(&mut self,
+            pause: bool,
+        ) -> Result<(), Error> {
+            if Self::env().caller() != self.root {
+                return Err(Error::NotRoot);
+            }
+            if self.shut_down {
+                return Err(Error::ContractShutDown);
+            }
+            self.paused = pause;
+            Ok(())
+        }
+
+        // 15 🟢 ROOT ONLY: Permanently shut down the contract
+        // Stops every message for good except the read-only messages and close_my_survey,
+        // so owners can still close their surveys and get their leftover coin back.
+        // Cannot be undone (pause_contract no longer works after this).
+        #[ink(message)]
+        pub fn shutdown_contract(&mut self) -> Result<(), Error> {
+            if Self::env().caller() != self.root {
+                return Err(Error::NotRoot);
+            }
+            self.shut_down = true;
+            Ok(())
+        }
+
         // END OF MESSAGE FUNCTIONS
 
     }
@@ -1463,6 +1559,8 @@ mod surveys {
         fn accounts() -> test::DefaultAccounts<E> { test::default_accounts::<E>() }
 
         fn setup() -> ContractStorage {
+            // alice instantiates the contract, so alice is root
+            test::set_caller::<E>(accounts().alice);
             let c = ContractStorage::new();
             let me = test::callee::<E>();
             test::set_account_balance::<E>(me, 1_000_000_000);
@@ -1570,6 +1668,153 @@ mod surveys {
             let r = c.get_survey_by_id(used).surveys1;
             assert_eq!(r.len(), 1);
             assert_eq!(r[0].total_responses, 1);
+        }
+
+        fn take1_ip(c: &mut ContractStorage, who: AccountId, id: Hash, ip: &str) -> Result<(), Error> {
+            test::set_caller::<E>(who);
+            c.take_a_survey_1(id, ip.as_bytes().to_vec(), b"yes".to_vec())
+        }
+
+        fn make3(c: &mut ContractStorage, who: AccountId, payout: Balance, max: u128) -> Hash {
+            test::set_caller::<E>(who);
+            test::set_value_transferred::<E>(payout * max);
+            test::advance_block::<E>();
+            c.make_a_new_survey_3(b"s3".to_vec(), true, payout, max,
+                b"a".to_vec(), b"b".to_vec(), b"c".to_vec()).unwrap();
+            test::set_value_transferred::<E>(0);
+            *c.map_account_surveys.get(who).unwrap().last().unwrap()
+        }
+
+        fn make5(c: &mut ContractStorage, who: AccountId, payout: Balance, max: u128) -> Hash {
+            test::set_caller::<E>(who);
+            test::set_value_transferred::<E>(payout * max);
+            test::advance_block::<E>();
+            c.make_a_new_survey_5(b"s5".to_vec(), true, payout, max,
+                b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec(), b"e".to_vec()).unwrap();
+            test::set_value_transferred::<E>(0);
+            *c.map_account_surveys.get(who).unwrap().last().unwrap()
+        }
+
+        fn bal(who: AccountId) -> Balance { test::get_account_balance::<E>(who).unwrap() }
+
+        // (5) a ban only covers the banning owner's surveys (all of them), not anyone else's
+        #[ink::test]
+        fn ip_ban_is_scoped_to_the_banning_owner() {
+            let a = accounts();
+            let mut c = setup();
+            let alice1 = make1(&mut c, a.alice, "a1", 10, 5);
+            let alice2 = make1(&mut c, a.alice, "a2", 10, 5);
+            let charlie1 = make1(&mut c, a.charlie, "c1", 10, 5);
+            take1_ip(&mut c, a.bob, alice1, "9.9.9.9").unwrap();
+
+            // only the owner of the survey the ip actually took can ban it
+            test::set_caller::<E>(a.charlie);
+            c.ban_this_ip_address(alice1, b"9.9.9.9".to_vec()).unwrap();
+            assert!(!c.is_banned(a.alice, &b"9.9.9.9".to_vec()));
+            assert!(!c.is_banned(a.charlie, &b"9.9.9.9".to_vec()));
+
+            test::set_caller::<E>(a.alice);
+            c.ban_this_ip_address(alice1, b"9.9.9.9".to_vec()).unwrap();
+
+            // blocked from alice's other survey (any account using that ip)...
+            assert_eq!(take1_ip(&mut c, a.django, alice2, "9.9.9.9"), Err(Error::AccessDenied));
+            // ...but still free to take charlie's survey
+            take1_ip(&mut c, a.django, charlie1, "9.9.9.9").unwrap();
+            // other ips are unaffected on alice's surveys
+            take1_ip(&mut c, a.eve, alice2, "8.8.8.8").unwrap();
+        }
+
+        // (6) only root can pause; pause blocks every storage-changing message; reads still work
+        #[ink::test]
+        fn pause_blocks_writes_and_only_root_can_pause() {
+            let a = accounts();
+            let mut c = setup();
+            let id = make1(&mut c, a.bob, "s", 10, 5);
+
+            test::set_caller::<E>(a.bob);
+            assert_eq!(c.pause_contract(true), Err(Error::NotRoot));
+
+            test::set_caller::<E>(a.alice);
+            c.pause_contract(true).unwrap();
+
+            test::set_caller::<E>(a.bob);
+            test::set_value_transferred::<E>(50);
+            assert_eq!(c.make_a_new_survey_1(b"x".to_vec(), true, 10, 5, b"q".to_vec()), Err(Error::ContractPaused));
+            assert_eq!(c.make_a_new_survey_3(b"x".to_vec(), true, 10, 5, b"q".to_vec(), b"q".to_vec(), b"q".to_vec()), Err(Error::ContractPaused));
+            assert_eq!(c.make_a_new_survey_5(b"x".to_vec(), true, 10, 5, b"q".to_vec(), b"q".to_vec(), b"q".to_vec(), b"q".to_vec(), b"q".to_vec()), Err(Error::ContractPaused));
+            test::set_value_transferred::<E>(0);
+            assert_eq!(take1(&mut c, a.charlie, id), Err(Error::ContractPaused));
+            assert_eq!(c.take_a_survey_3(id, b"1".to_vec(), b"a".to_vec(), b"a".to_vec(), b"a".to_vec()), Err(Error::ContractPaused));
+            assert_eq!(c.take_a_survey_5(id, b"1".to_vec(), b"a".to_vec(), b"a".to_vec(), b"a".to_vec(), b"a".to_vec(), b"a".to_vec()), Err(Error::ContractPaused));
+            test::set_caller::<E>(a.bob);
+            assert_eq!(c.close_my_survey(id, 1), Err(Error::ContractPaused));
+            assert_eq!(c.ban_this_ip_address(id, b"1".to_vec()), Err(Error::ContractPaused));
+
+            // reads still work
+            assert_eq!(c.get_available_surveys().surveys1.len(), 1);
+            assert_eq!(c.get_my_surveys().surveys1.len(), 1);
+
+            // unpause and everything works again
+            test::set_caller::<E>(a.alice);
+            c.pause_contract(false).unwrap();
+            take1(&mut c, a.charlie, id).unwrap();
+        }
+
+        // (7) shutdown: root only, permanent, leaves only reads and close_my_survey working
+        #[ink::test]
+        fn shutdown_stops_all_but_reads_and_close() {
+            let a = accounts();
+            let mut c = setup();
+            let s1 = make1(&mut c, a.bob, "b1", 10, 5);   // 50 staked
+            let s3 = make3(&mut c, a.charlie, 7, 4);      // 28 staked
+            let s5 = make5(&mut c, a.bob, 3, 10);         // 30 staked
+            take1(&mut c, a.django, s1).unwrap();         // s1 now has 40 left
+
+            test::set_caller::<E>(a.bob);
+            assert_eq!(c.shutdown_contract(), Err(Error::NotRoot));
+
+            // shutdown works even while paused
+            test::set_caller::<E>(a.alice);
+            c.pause_contract(true).unwrap();
+            c.shutdown_contract().unwrap();
+            assert_eq!(c.pause_contract(false), Err(Error::ContractShutDown));
+            assert_eq!(c.pause_contract(true), Err(Error::ContractShutDown));
+
+            // no new surveys, responses or bans
+            test::set_caller::<E>(a.eve);
+            test::set_value_transferred::<E>(50);
+            assert_eq!(c.make_a_new_survey_1(b"x".to_vec(), true, 10, 5, b"q".to_vec()), Err(Error::ContractShutDown));
+            assert_eq!(c.make_a_new_survey_3(b"x".to_vec(), true, 10, 5, b"q".to_vec(), b"q".to_vec(), b"q".to_vec()), Err(Error::ContractShutDown));
+            assert_eq!(c.make_a_new_survey_5(b"x".to_vec(), true, 10, 5, b"q".to_vec(), b"q".to_vec(), b"q".to_vec(), b"q".to_vec(), b"q".to_vec()), Err(Error::ContractShutDown));
+            test::set_value_transferred::<E>(0);
+            assert_eq!(take1(&mut c, a.eve, s1), Err(Error::ContractShutDown));
+            assert_eq!(c.take_a_survey_3(s3, b"1".to_vec(), b"a".to_vec(), b"a".to_vec(), b"a".to_vec()), Err(Error::ContractShutDown));
+            assert_eq!(c.take_a_survey_5(s5, b"1".to_vec(), b"a".to_vec(), b"a".to_vec(), b"a".to_vec(), b"a".to_vec(), b"a".to_vec()), Err(Error::ContractShutDown));
+            test::set_caller::<E>(a.bob);
+            assert_eq!(c.ban_this_ip_address(s1, b"1.1.1.1".to_vec()), Err(Error::ContractShutDown));
+
+            // reads still work; nothing is listed as available
+            let av = c.get_available_surveys();
+            assert!(av.surveys1.is_empty() && av.surveys3.is_empty() && av.surveys5.is_empty());
+            assert_eq!(c.get_my_surveys().surveys1.len(), 1);
+            assert_eq!(c.get_survey_by_id(s3).surveys3.len(), 1);
+            assert_eq!(c.get_survey_responses_1(s1, 0, 1).len(), 1);
+
+            // owners close their surveys and get their leftover coin back
+            let bob0 = bal(a.bob);
+            let charlie0 = bal(a.charlie);
+            c.close_my_survey(s1, 1).unwrap();
+            c.close_my_survey(s5, 5).unwrap();
+            assert_eq!(bal(a.bob), bob0 + 40 + 30);
+            test::set_caller::<E>(a.charlie);
+            c.close_my_survey(s3, 3).unwrap();
+            assert_eq!(bal(a.charlie), charlie0 + 28);
+            // and only once
+            c.close_my_survey(s3, 3).unwrap();
+            assert_eq!(bal(a.charlie), charlie0 + 28);
+            // still only the owner can close
+            test::set_caller::<E>(a.eve);
+            assert_eq!(c.close_my_survey(s1, 1), Err(Error::AccessDenied));
         }
     }
 
