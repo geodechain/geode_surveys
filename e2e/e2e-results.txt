@@ -1,0 +1,62 @@
+chain=Development spec=20261018 contract=5HNFTx8Fe7jEAn3Sob6J39FTXJ6qWcVmJJ8mPAqQKUbHuvCL codeHash=0xae0b91d50c0896b5e2e91bac568db85b1ed195fd39f6311636f425ef9d04edba
+PASS  upload code as TC member (Alice)
+PASS  instantiate as Alice (becomes root)  (5HNFTx8Fe7jEAn3Sob6J39FTXJ6qWcVmJJ8mPAqQKUbHuvCL)
+PASS  bob makes 1Q survey "bob-1a" (stake 3 x payout)
+PASS  bob makes 1Q survey "bob-1b" (stake 3 x payout)
+PASS  bob makes 3Q survey "bob-3" (stake 2 x payout)
+PASS  bob makes 5Q survey "bob-5" (stake 2 x payout)
+PASS  charlie makes 1Q survey "charlie-1" (stake 3 x payout)
+PASS  contract holds every stake after setup  (held 130000000000000 staked 130000000000000)
+PASS  dave takes bob-1a from ip 10.0.0.1 and is paid the payout
+PASS  dave takes bob-3 (3Q) and is paid
+PASS  dave takes bob-5 (5Q) and is paid
+PASS  charlie cannot ban an ip on bob's survey (no effect)  ({"ok":{"ok":null}})
+PASS  bob bans ip 10.0.0.1 (it took bob-1a)
+PASS  banned ip blocked from bob's OTHER survey bob-1b (AccessDenied)  ({"ok":{"err":"AccessDenied"}})
+PASS    ...and a real submission is rejected with no payout  (contracts.ContractReverted)
+PASS  banned ip can still take charlie's survey and is paid
+PASS  a different ip can still take bob-1b
+PASS  bob cannot pause (NotRoot)  ({"ok":{"err":"NotRoot"}})
+PASS  alice (root) pauses
+PASS  paused: make 1Q -> ContractPaused  ({"ok":{"err":"ContractPaused"}})
+PASS  paused: make 3Q -> ContractPaused  ({"ok":{"err":"ContractPaused"}})
+PASS  paused: make 5Q -> ContractPaused  ({"ok":{"err":"ContractPaused"}})
+PASS  paused: take 1Q -> ContractPaused  ({"ok":{"err":"ContractPaused"}})
+PASS  paused: take 3Q -> ContractPaused  ({"ok":{"err":"ContractPaused"}})
+PASS  paused: take 5Q -> ContractPaused  ({"ok":{"err":"ContractPaused"}})
+PASS  paused: ban -> ContractPaused  ({"ok":{"err":"ContractPaused"}})
+PASS  paused: close my survey -> ContractPaused  ({"ok":{"err":"ContractPaused"}})
+PASS  paused: real take submission rejected, no payout  (contracts.ContractReverted)
+PASS  paused: getAvailableSurveys still works  (3 1Q listed)
+PASS  paused: owner can still read responses
+PASS  paused: getSurveyById still works
+PASS  alice unpauses
+PASS  after unpause, ferdie takes charlie-1 and is paid
+PASS  bob cannot shut down (NotRoot)  ({"ok":{"err":"NotRoot"}})
+PASS  alice shuts down (while paused)  (no coin moved by shutdown)
+PASS  shut down: make 1Q -> ContractShutDown  ({"ok":{"err":"ContractShutDown"}})
+PASS  shut down: make 3Q -> ContractShutDown  ({"ok":{"err":"ContractShutDown"}})
+PASS  shut down: make 5Q -> ContractShutDown  ({"ok":{"err":"ContractShutDown"}})
+PASS  shut down: take 1Q -> ContractShutDown  ({"ok":{"err":"ContractShutDown"}})
+PASS  shut down: take 3Q -> ContractShutDown  ({"ok":{"err":"ContractShutDown"}})
+PASS  shut down: take 5Q -> ContractShutDown  ({"ok":{"err":"ContractShutDown"}})
+PASS  shut down: ban -> ContractShutDown  ({"ok":{"err":"ContractShutDown"}})
+PASS  shut down: root cannot unpause  ({"ok":{"err":"ContractShutDown"}})
+PASS  shut down: root cannot pause either  ({"ok":{"err":"ContractShutDown"}})
+PASS  shut down: calling shutdown again is harmless  ({"ok":{"ok":null}})
+PASS  shut down: available list is empty
+PASS  shut down: owner can still read responses
+PASS  shut down: non-owner cannot close bob's survey (AccessDenied)  ({"ok":{"err":"AccessDenied"}})
+PASS  shut down: bob closes bob-1a and gets its leftover back (20000000000000)
+PASS    ...closing bob-1a again refunds nothing
+PASS  shut down: bob closes bob-1b and gets its leftover back (20000000000000)
+PASS    ...closing bob-1b again refunds nothing
+PASS  shut down: bob closes bob-3 and gets its leftover back (10000000000000)
+PASS    ...closing bob-3 again refunds nothing
+PASS  shut down: bob closes bob-5 and gets its leftover back (10000000000000)
+PASS    ...closing bob-5 again refunds nothing
+PASS  shut down: charlie closes charlie-1 and gets its leftover back (10000000000000)
+PASS    ...closing charlie-1 again refunds nothing
+PASS  refunds = stakes - payouts (no coin lost or stuck)  (staked 130000000000000 paid 60000000000000 refunded 70000000000000)
+PASS  contract balance is back to what it held right after instantiation  (start 0 end 0)
+60 passed, 0 failed

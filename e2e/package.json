@@ -1,0 +1,11 @@
+{
+  "name": "surveys-e2e",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end test of the Surveys contract on a local Geode dev node (node e2e.mjs ../target/ink)",
+  "dependencies": {
+    "@polkadot/api": "16.4.9",
+    "@polkadot/api-contract": "16.4.9",
+    "@polkadot/keyring": "14.0.3"
+  }
+}
